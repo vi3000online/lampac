@@ -24,7 +24,7 @@ public class PiTor : BaseOnlineController
     [HttpGet]
     [Staticache]
     [Route("lite/pidtor")]
-    async public Task<ActionResult> Index(string title, string original_title, int year, string original_language, int serial, int s = -1, bool rjson = false)
+    async public Task<ActionResult> Index(string title, string original_title, int year, string original_language, int serial, int s = -1, bool rjson = false, string voice = null)
     {
         var init = ModInit.conf;
         if (!init.enable)
@@ -340,21 +340,74 @@ public class PiTor : BaseOnlineController
             }
             else
             {
-                var mtpl = new MovieTpl(title, original_title);
+                // Группируем раздачи по озвучке: каждая озвучка — пункт фильтра «Перевод»,
+                // а разные качества одной озвучки — выбор качества в плеере.
+                static string MagnetHash(string magnet)
+                    => Regex.Match(magnet, "magnet:\\?xt=urn:btih:([a-zA-Z0-9]+)").Groups[1].Value.ToLower();
 
-                foreach (var torrent in torrents)
+                static int QualityRank(string q) => q switch
                 {
-                    string hashmagnet = Regex.Match(torrent.magnet, "magnet:\\?xt=urn:btih:([a-zA-Z0-9]+)").Groups[1].Value.ToLower();
-                    if (string.IsNullOrWhiteSpace(hashmagnet))
-                        continue;
+                    "2160p" => 4,
+                    "1440p" => 3,
+                    "1080p" => 2,
+                    "720p" => 1,
+                    _ => 0
+                };
 
-                    mtpl.Append(
-                        torrent.voice,
-                        accsArgs($"{host}/lite/pidtor/s{hashmagnet}?{torrent.tr}"),
-                        voice_name: $"{torrent.quality} / {torrent.mediainfo} / {torrent.sid}",
-                        quality: torrent.quality.Replace("p", "")
-                    );
+                var voiceGroups = torrents
+                    .Where(t => !string.IsNullOrWhiteSpace(MagnetHash(t.magnet)))
+                    .GroupBy(t => string.IsNullOrWhiteSpace(t.voice) ? "Оригинал" : t.voice)
+                    .ToList();
+
+                if (voiceGroups.Count == 0)
+                    return new MovieTpl(title, original_title);
+
+                // Активная озвучка — из ?voice= либо первая.
+                string selectedVoice = !string.IsNullOrEmpty(voice) && voiceGroups.Any(g => g.Key == voice)
+                    ? voice
+                    : voiceGroups[0].Key;
+
+                #region фильтр «Перевод»
+                var vtpl = new VoiceTpl(voiceGroups.Count);
+                foreach (var g in voiceGroups)
+                {
+                    string vlink = accsArgs($"{host}/lite/pidtor?rjson={rjson}&title={en_title}&original_title={en_original_title}&year={year}&original_language={original_language}&serial=0&voice={HttpUtility.UrlEncode(g.Key)}");
+                    vtpl.Append(g.Key, g.Key == selectedVoice, vlink);
                 }
+                #endregion
+
+                var mtpl = new MovieTpl(title, original_title, vtpl);
+
+                // Раздачи активной озвучки: по одному (лучшему по сидам) торренту на качество.
+                var byQuality = voiceGroups.First(g => g.Key == selectedVoice)
+                    .GroupBy(t => t.quality)
+                    .Select(g => g.OrderByDescending(t => t.sid).First())
+                    .OrderByDescending(t => QualityRank(t.quality))
+                    .ToList();
+
+                if (byQuality.Count == 0)
+                    return mtpl;
+
+                #region выбор качества
+                var sq = new StreamQualityTpl();
+                foreach (var t in byQuality)
+                {
+                    string hash = MagnetHash(t.magnet);
+                    sq.Append(accsArgs($"{host}/lite/pidtor/s{hash}?{t.tr}"), t.quality);
+                }
+
+                if (!sq.Any())
+                    return mtpl;
+                #endregion
+
+                var best = byQuality[0];
+                mtpl.Append(
+                    selectedVoice,
+                    accsArgs($"{host}/lite/pidtor/s{MagnetHash(best.magnet)}?{best.tr}"),
+                    streamquality: sq,
+                    voice_name: $"{best.mediainfo} / {best.sid}",
+                    quality: best.quality
+                );
 
                 return mtpl;
             }

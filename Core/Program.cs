@@ -226,7 +226,31 @@ public class Program
         ProxyImg.Initialization();
         ProxyAPI.Initialization();
         Staticache.Initialization();
-        HybridFileCache.LoadCache();
+
+        if (CoreInit.conf.cache?.type == "pg")
+        {
+            try
+            {
+                PostgresHybridCache.Initialize(CoreInit.conf.cache.pg.connectionString);
+                Console.WriteLine("cache backend: postgres");
+
+                if (CoreInit.conf.rch.enable)
+                {
+                    CoreInit.conf.rch.enable = false;
+                    Console.WriteLine("rch disabled: postgres provides distributed cache and single-flight");
+                }
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Error(ex, "Postgres cache initialization failed");
+                Console.WriteLine($"Postgres cache init failed: {ex.Message}");
+                throw;
+            }
+        }
+        else
+        {
+            HybridFileCache.LoadCache();
+        }
 
         GCMode.Initialization();
 

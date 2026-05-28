@@ -353,6 +353,10 @@ public class CoreInit
         HighMemoryPercent = 80
     };
 
+    // Глобальный лимит одновременно открытых Playwright-вкладок (chromium + firefox суммарно).
+    // 0 — без лимита (старое поведение). При исчерпании запросы ждут в очереди.
+    public int playwright_maxPages = 8;
+
     public PuppeteerConf chromium = new PuppeteerConf()
     {
         enable = true,
@@ -397,7 +401,16 @@ public class CoreInit
         version = true,
         checkOnlineSearch = true,
         btn_priority_forced = true,
-        with_search = new HashSet<string>()
+        with_search = new HashSet<string>(),
+        bestBalanser = new BestBalanserConf
+        {
+            enable = false,
+            hideBroken = true,
+            totalTimeoutMs = 7000,
+            perProbeTimeoutMs = 5000,
+            successCacheMinutes = 30,
+            failureCacheMinutes = 3
+        }
     };
 
     public SisiConf sisi { get; set; } = new SisiConf()

@@ -369,9 +369,16 @@ public class Chromium : PlaywrightBase, IDisposable
 
     KeepopenPage keepopen_page { get; set; }
 
+    bool gateAcquired;
+
 
     async public Task<IPage> NewPageAsync(string plugin, Dictionary<string, string> headers = null, (string ip, string username, string password) proxy = default, bool keepopen = true, bool imitationHuman = false, bool deferredDispose = false)
     {
+        if (browser == null)
+            return null;
+
+        gateAcquired = await PlaywrightBrowser.AcquirePageAsync().ConfigureAwait(false);
+
         try
         {
             if (browser == null)
@@ -559,44 +566,55 @@ public class Chromium : PlaywrightBase, IDisposable
 
     public void Dispose()
     {
-        if (browser == null || page == null || CoreInit.conf.chromium.DEV)
-            return;
-
         try
         {
-            page.RequestFailed -= Page_RequestFailed;
-            page.Popup -= Page_Popup;
-            page.Download -= Page_Download;
+            if (browser == null || page == null || CoreInit.conf.chromium.DEV)
+                return;
 
-            void close()
+            try
             {
-                if (keepopen_page != null)
+                page.RequestFailed -= Page_RequestFailed;
+                page.Popup -= Page_Popup;
+                page.Download -= Page_Download;
+
+                void close()
                 {
-                    page.CloseAsync().ConfigureAwait(false);
+                    if (keepopen_page != null)
+                    {
+                        page.CloseAsync().ConfigureAwait(false);
+                    }
+                    else if (context != null)
+                    {
+                        context.CloseAsync().ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        page.CloseAsync().ConfigureAwait(false);
+                    }
                 }
-                else if (context != null)
+
+                if (imitationHuman || deferredDispose)
                 {
-                    context.CloseAsync().ConfigureAwait(false);
+                    Task.Delay(deferredDispose ? 2_000 : 10_000)
+                        .ContinueWith(t => close());
                 }
                 else
                 {
-                    page.CloseAsync().ConfigureAwait(false);
+                    close();
                 }
             }
-
-            if (imitationHuman || deferredDispose)
+            catch (Exception ex)
             {
-                Task.Delay(deferredDispose ? 2_000 : 10_000)
-                    .ContinueWith(t => close());
-            }
-            else
-            {
-                close();
+                Log.Error(ex, "CatchId={CatchId}", "id_k0df4qmv");
             }
         }
-        catch (Exception ex)
+        finally
         {
-            Log.Error(ex, "CatchId={CatchId}", "id_k0df4qmv");
+            if (gateAcquired)
+            {
+                gateAcquired = false;
+                PlaywrightBrowser.ReleasePage();
+            }
         }
     }
 

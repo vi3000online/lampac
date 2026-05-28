@@ -3,7 +3,14 @@
 
   var Defined = {
     api: 'lampac',
-    localhost: '{localhost}/',
+    // Балансировка: при загрузке плагина случайно выбираем один из vapi-хостов
+    // и фиксируем его на всю сессию (иначе memkey / lifeevents развалятся).
+    localhost: (function() {
+      var hosts = ['vapi1.vi3000.com', 'vapi2.vi3000.com', 'vapi3.vi3000.com', 'vapi4.vi3000.com'];
+      var pick = hosts[Math.floor(Math.random() * hosts.length)];
+      var scheme = (window.location.protocol === 'http:' ? 'http:' : 'https:');
+      return scheme + '//' + pick + '/';
+    })(),
     apn: ''
   };
 
@@ -82,7 +89,7 @@
 	
     if (balansers_with_search == undefined) {
       network.timeout(10000);
-      network.silent(account('{localhost}/lite/withsearch'), function(json) {
+      network.silent(account(Defined.localhost + 'lite/withsearch'), function(json) {
         balansers_with_search = json;
       }, function() {
 		  balansers_with_search = [];
@@ -312,17 +319,17 @@
             show: typeof j.show == 'undefined' ? true : j.show
           };
         });
-        filter_sources = prioritizeBalansers(Lampa.Arrays.getKeys(sources));
+        //filter_sources = prioritizeBalansers(Lampa.Arrays.getKeys(sources));
+        filter_sources = Lampa.Arrays.getKeys(sources);
         if (filter_sources.length) {
-          var last_select_balanser = Lampa.Storage.cache('online_last_balanser', 3000, {});
-          if (last_select_balanser[object.movie.id]) {
-            balanser = last_select_balanser[object.movie.id];
+          if (object.lampac_custom_select && sources[object.lampac_custom_select]) {
+            balanser = object.lampac_custom_select;
           } else {
-            balanser = Lampa.Storage.get('online_balanser', filter_sources[0]);
+            balanser = filter_sources[0];
           }
           if (!sources[balanser]) balanser = filter_sources[0];
           if (!sources[balanser].show && !object.lampac_custom_select) balanser = filter_sources[0];
-          source = sources[balanser].url; 
+          source = sources[balanser].url;
           Lampa.Storage.set('active_balanser', balanser);
           resolve(json);
         } else {
@@ -366,7 +373,8 @@
                 show: typeof j.show == 'undefined' ? true : j.show
               };
             });
-            filter_sources = prioritizeBalansers(Lampa.Arrays.getKeys(sources));
+            //filter_sources = prioritizeBalansers(Lampa.Arrays.getKeys(sources));
+            filter_sources = Lampa.Arrays.getKeys(sources);
             filter.set('sort', filter_sources.map(function(e) {
               return {
                 title: sources[e].name,
@@ -404,7 +412,10 @@
     this.createSource = function() {
       var _this4 = this;
       return new Promise(function(resolve, reject) {
-        var url = _this4.requestParams(Defined.localhost + 'lite/events?life=true');
+        // life=true: бэкенд отвечает сразу с memkey, а сбор источников идёт в фоне.
+        // Дальше фронт опрашивает /lifeevents через lifeSource(), и пользователь
+        // не зависит от того, как долго отрабатывает «синхронная» агрегация.
+        var url = _this4.requestParams(Defined.localhost + 'lite/events') + '&life=true';
         network.timeout(15000);
         network.silent(account(url), function(json) {
           if (json.accsdb) return reject(json);
@@ -1707,15 +1718,27 @@
         uk: 'Пошук на ({balanser}) не дав результатів',
         en: 'Search on ({balanser}) did not return any results',
         zh: '搜索 ({balanser}) 未返回任何结果'
+      },
+      lampac_searching_fastest: {
+        ru: 'Подбираем для вас самые быстрые источники',
+        uk: 'Підбираємо для вас найшвидші джерела',
+        en: 'Picking the fastest sources for you',
+        zh: '正在为您挑选最快的来源'
+      },
+      lampac_searching_hint: {
+        ru: 'Это займёт пару секунд',
+        uk: 'Це займе кілька секунд',
+        en: 'This will take a couple of seconds',
+        zh: '只需几秒钟'
       }
     });
     Lampa.Template.add('lampac_css', "\n        <style>\n        @charset 'UTF-8';.online-prestige{position:relative;-webkit-border-radius:.3em;border-radius:.3em;background-color:rgba(0,0,0,0.3);display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex}.online-prestige__body{padding:1.2em;line-height:1.3;-webkit-box-flex:1;-webkit-flex-grow:1;-moz-box-flex:1;-ms-flex-positive:1;flex-grow:1;position:relative}@media screen and (max-width:480px){.online-prestige__body{padding:.8em 1.2em}}.online-prestige__img{position:relative;width:13em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0;min-height:8.2em}.online-prestige__img>img{position:absolute;top:0;left:0;width:100%;height:100%;-o-object-fit:cover;object-fit:cover;-webkit-border-radius:.3em;border-radius:.3em;opacity:0;-webkit-transition:opacity .3s;-o-transition:opacity .3s;-moz-transition:opacity .3s;transition:opacity .3s}.online-prestige__img--loaded>img{opacity:1}@media screen and (max-width:480px){.online-prestige__img{width:7em;min-height:6em}}.online-prestige__folder{padding:1em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}.online-prestige__folder>svg{width:4.4em !important;height:4.4em !important}.online-prestige__viewed{position:absolute;top:1em;left:1em;background:rgba(0,0,0,0.45);-webkit-border-radius:100%;border-radius:100%;padding:.25em;font-size:.76em}.online-prestige__viewed>svg{width:1.5em !important;height:1.5em !important}.online-prestige__episode-number{position:absolute;top:0;left:0;right:0;bottom:0;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center;-webkit-box-pack:center;-webkit-justify-content:center;-moz-box-pack:center;-ms-flex-pack:center;justify-content:center;font-size:2em}.online-prestige__loader{position:absolute;top:50%;left:50%;width:2em;height:2em;margin-left:-1em;margin-top:-1em;background:url(./img/loader.svg) no-repeat center center;-webkit-background-size:contain;-o-background-size:contain;background-size:contain}.online-prestige__head,.online-prestige__footer{display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-pack:justify;-webkit-justify-content:space-between;-moz-box-pack:justify;-ms-flex-pack:justify;justify-content:space-between;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center}.online-prestige__timeline{margin:.8em 0}.online-prestige__timeline>.time-line{display:block !important}.online-prestige__title{font-size:1.7em;overflow:hidden;-o-text-overflow:ellipsis;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;line-clamp:1;-webkit-box-orient:vertical}@media screen and (max-width:480px){.online-prestige__title{font-size:1.4em}}.online-prestige__time{padding-left:2em}.online-prestige__info{display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center}.online-prestige__info>*{overflow:hidden;-o-text-overflow:ellipsis;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;line-clamp:1;-webkit-box-orient:vertical}.online-prestige__quality{padding-left:1em;white-space:nowrap}.online-prestige__scan-file{position:absolute;bottom:0;left:0;right:0}.online-prestige__scan-file .broadcast__scan{margin:0}.online-prestige .online-prestige-split{font-size:.8em;margin:0 1em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}.online-prestige.focus::after{content:'';position:absolute;top:-0.6em;left:-0.6em;right:-0.6em;bottom:-0.6em;-webkit-border-radius:.7em;border-radius:.7em;border:solid .3em #fff;z-index:-1;pointer-events:none}.online-prestige+.online-prestige{margin-top:1.5em}.online-prestige--folder .online-prestige__footer{margin-top:.8em}.online-prestige-watched{padding:1em}.online-prestige-watched__icon>svg{width:1.5em;height:1.5em}.online-prestige-watched__body{padding-left:1em;padding-top:.1em;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-flex-wrap:wrap;-ms-flex-wrap:wrap;flex-wrap:wrap}.online-prestige-watched__body>span+span::before{content:' ● ';vertical-align:top;display:inline-block;margin:0 .5em}.online-prestige-rate{display:-webkit-inline-box;display:-webkit-inline-flex;display:-moz-inline-box;display:-ms-inline-flexbox;display:inline-flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center}.online-prestige-rate>svg{width:1.3em !important;height:1.3em !important}.online-prestige-rate>span{font-weight:600;font-size:1.1em;padding-left:.7em}.online-empty{line-height:1.4}.online-empty__title{font-size:1.8em;margin-bottom:.3em}.online-empty__time{font-size:1.2em;font-weight:300;margin-bottom:1.6em}.online-empty__buttons{display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex}.online-empty__buttons>*+*{margin-left:1em}.online-empty__button{background:rgba(0,0,0,0.3);font-size:1.2em;padding:.5em 1.2em;-webkit-border-radius:.2em;border-radius:.2em;margin-bottom:2.4em}.online-empty__button.focus{background:#fff;color:black}.online-empty__templates .online-empty-template:nth-child(2){opacity:.5}.online-empty__templates .online-empty-template:nth-child(3){opacity:.2}.online-empty-template{background-color:rgba(255,255,255,0.3);padding:1em;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center;-webkit-border-radius:.3em;border-radius:.3em}.online-empty-template>*{background:rgba(0,0,0,0.3);-webkit-border-radius:.3em;border-radius:.3em}.online-empty-template__ico{width:4em;height:4em;margin-right:2.4em}.online-empty-template__body{height:1.7em;width:70%}.online-empty-template+.online-empty-template{margin-top:1em}\n        </style>\n    ");
     $('body').append(Lampa.Template.get('lampac_css', {}, true));
-    $('body').append('<style>.lampac-balanser-hint{display:flex;align-items:flex-start;gap:.7em;margin:.6em 0 0;padding:.85em 1em;border-left:.25em solid #f8c24e;border-radius:.3em;background:rgba(248,194,78,.14);color:rgba(255,255,255,.88);font-size:.92em;line-height:1.35}.lampac-balanser-hint:before{content:"!";display:flex;align-items:center;justify-content:center;flex-shrink:0;width:1.35em;height:1.35em;border-radius:50%;background:#f8c24e;color:#1b1b1b;font-weight:700}</style>');
+    $('body').append('<style>.lampac-balanser-hint{display:flex;align-items:center;gap:1em;margin:.8em 0 0;padding:1.1em 1.3em;border-left:.3em solid #f8c24e;border-radius:.35em;background:rgba(248,194,78,.16);color:rgba(255,255,255,.92);font-size:1.15em;line-height:1.4}.lampac-balanser-hint:before{content:"!";display:flex;align-items:center;justify-content:center;flex-shrink:0;width:1.6em;height:1.6em;border-radius:50%;background:#f8c24e;color:#1b1b1b;font-weight:700;font-size:1.05em}.lampac-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2.6em 1em 2em;gap:.9em;text-align:center}.lampac-loading__title{font-size:1.7em;font-weight:400;letter-spacing:.01em;background:linear-gradient(90deg,rgba(255,255,255,.55) 0%,#fff 35%,#f8c24e 50%,#fff 65%,rgba(255,255,255,.55) 100%);background-size:200% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;animation:lampac-shimmer 3s linear infinite}.lampac-loading__hint{font-size:1em;font-weight:300;color:rgba(255,255,255,.55);margin-top:.2em}.lampac-loading__dots{display:flex;gap:.55em;margin-bottom:.3em}.lampac-loading__dots>span{width:.75em;height:.75em;border-radius:50%;background:#f8c24e;box-shadow:0 0 .8em rgba(248,194,78,.55);animation:lampac-bounce 1.2s ease-in-out infinite}.lampac-loading__dots>span:nth-child(2){animation-delay:.15s}.lampac-loading__dots>span:nth-child(3){animation-delay:.3s}@keyframes lampac-shimmer{0%{background-position:200% center}100%{background-position:-200% center}}@keyframes lampac-bounce{0%,80%,100%{transform:translateY(0) scale(.7);opacity:.45}40%{transform:translateY(-.45em) scale(1);opacity:1}}@media screen and (max-width:480px){.lampac-loading{padding:1.8em 1em 1.4em}.lampac-loading__title{font-size:1.3em}.lampac-loading__hint{font-size:.85em}}</style>');
 
     function resetTemplates() {
       Lampa.Template.add('lampac_prestige_full', "<div class=\"online-prestige online-prestige--full selector\">\n            <div class=\"online-prestige__img\">\n                <img alt=\"\">\n                <div class=\"online-prestige__loader\"></div>\n            </div>\n            <div class=\"online-prestige__body\">\n                <div class=\"online-prestige__head\">\n                    <div class=\"online-prestige__title\">{title}</div>\n                    <div class=\"online-prestige__time\">{time}</div>\n                </div>\n\n                <div class=\"online-prestige__timeline\"></div>\n\n                <div class=\"online-prestige__footer\">\n                    <div class=\"online-prestige__info\">{info}</div>\n                    <div class=\"online-prestige__quality\">{quality}</div>\n                </div>\n            </div>\n        </div>");
-      Lampa.Template.add('lampac_content_loading', "<div class=\"online-empty\">\n            <div class=\"broadcast__scan\"><div></div></div>\n\t\t\t\n            <div class=\"online-empty__templates\">\n                <div class=\"online-empty-template selector\">\n                    <div class=\"online-empty-template__ico\"></div>\n                    <div class=\"online-empty-template__body\"></div>\n                </div>\n                <div class=\"online-empty-template\">\n                    <div class=\"online-empty-template__ico\"></div>\n                    <div class=\"online-empty-template__body\"></div>\n                </div>\n                <div class=\"online-empty-template\">\n                    <div class=\"online-empty-template__ico\"></div>\n                    <div class=\"online-empty-template__body\"></div>\n                </div>\n            </div>\n        </div>");
+      Lampa.Template.add('lampac_content_loading', "<div class=\"online-empty\">\n            <div class=\"lampac-loading\">\n                <div class=\"lampac-loading__dots\"><span></span><span></span><span></span></div>\n                <div class=\"lampac-loading__title\">#{lampac_searching_fastest}</div>\n                <div class=\"lampac-loading__hint\">#{lampac_searching_hint}</div>\n            </div>\n            <div class=\"online-empty__templates\">\n                <div class=\"online-empty-template selector\">\n                    <div class=\"online-empty-template__ico\"></div>\n                    <div class=\"online-empty-template__body\"></div>\n                </div>\n                <div class=\"online-empty-template\">\n                    <div class=\"online-empty-template__ico\"></div>\n                    <div class=\"online-empty-template__body\"></div>\n                </div>\n                <div class=\"online-empty-template\">\n                    <div class=\"online-empty-template__ico\"></div>\n                    <div class=\"online-empty-template__body\"></div>\n                </div>\n            </div>\n        </div>");
       Lampa.Template.add('lampac_does_not_answer', "<div class=\"online-empty\">\n            <div class=\"online-empty__title\">\n                #{lampac_balanser_dont_work}\n            </div>\n            <div class=\"online-empty__time\">\n                #{lampac_balanser_timeout}\n            </div>\n            <div class=\"online-empty__buttons\">\n                <div class=\"online-empty__button selector cancel\">#{cancel}</div>\n                <div class=\"online-empty__button selector change\">#{lampac_change_balanser}</div>\n            </div>\n            <div class=\"online-empty__templates\">\n                <div class=\"online-empty-template\">\n                    <div class=\"online-empty-template__ico\"></div>\n                    <div class=\"online-empty-template__body\"></div>\n                </div>\n                <div class=\"online-empty-template\">\n                    <div class=\"online-empty-template__ico\"></div>\n                    <div class=\"online-empty-template__body\"></div>\n                </div>\n                <div class=\"online-empty-template\">\n                    <div class=\"online-empty-template__ico\"></div>\n                    <div class=\"online-empty-template__body\"></div>\n                </div>\n            </div>\n        </div>");
       Lampa.Template.add('lampac_prestige_rate', "<div class=\"online-prestige-rate\">\n            <svg width=\"17\" height=\"16\" viewBox=\"0 0 17 16\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">\n                <path d=\"M8.39409 0.192139L10.99 5.30994L16.7882 6.20387L12.5475 10.4277L13.5819 15.9311L8.39409 13.2425L3.20626 15.9311L4.24065 10.4277L0 6.20387L5.79819 5.30994L8.39409 0.192139Z\" fill=\"#fff\"></path>\n            </svg>\n            <span>{rate}</span>\n        </div>");
       Lampa.Template.add('lampac_prestige_folder', "<div class=\"online-prestige online-prestige--folder selector\">\n            <div class=\"online-prestige__folder\">\n                <svg viewBox=\"0 0 128 112\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">\n                    <rect y=\"20\" width=\"128\" height=\"92\" rx=\"13\" fill=\"white\"></rect>\n                    <path d=\"M29.9963 8H98.0037C96.0446 3.3021 91.4079 0 86 0H42C36.5921 0 31.9555 3.3021 29.9963 8Z\" fill=\"white\" fill-opacity=\"0.23\"></path>\n                    <rect x=\"11\" y=\"8\" width=\"106\" height=\"76\" rx=\"13\" fill=\"white\" fill-opacity=\"0.51\"></rect>\n                </svg>\n            </div>\n            <div class=\"online-prestige__body\">\n                <div class=\"online-prestige__head\">\n                    <div class=\"online-prestige__title\">{title}</div>\n                    <div class=\"online-prestige__time\">{time}</div>\n                </div>\n\n                <div class=\"online-prestige__footer\">\n                    <div class=\"online-prestige__info\">{info}</div>\n                </div>\n            </div>\n        </div>");

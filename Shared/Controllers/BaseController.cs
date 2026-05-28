@@ -483,6 +483,7 @@ public class BaseController : Controller
         #endregion
 
         SemaphorManager semaphore = null;
+        IAsyncDisposable distLock = null;
 
         try
         {
@@ -500,6 +501,22 @@ public class BaseController : Controller
                         HttpContext.Response.Headers["X-Invoke-Cache"] = "HIT";
                         UpdateStatiCacheFeatures(cachEx);
                         return entryValue;
+                    }
+                }
+
+                var dl = HybridCache.GetDistributedLock();
+                if (dl != null)
+                {
+                    var pg = CoreInit.conf.cache.pg;
+                    distLock = await dl.AcquireAsync(key, TimeSpan.FromMilliseconds(pg.advisoryLockTimeoutMs)).ConfigureAwait(false);
+                    if (distLock != null && hybridCache.ContainsKey(key, out entryValue, out cachEx))
+                    {
+                        if (entryValue != null && !entryValue.Equals(default(T)))
+                        {
+                            HttpContext.Response.Headers["X-Invoke-Cache"] = "HIT";
+                            UpdateStatiCacheFeatures(cachEx);
+                            return entryValue;
+                        }
                     }
                 }
             }
@@ -525,6 +542,8 @@ public class BaseController : Controller
         }
         finally
         {
+            if (distLock != null)
+                await distLock.DisposeAsync().ConfigureAwait(false);
             semaphore?.Release();
         }
     }
@@ -567,6 +586,7 @@ public class BaseController : Controller
         #endregion
 
         SemaphorManager semaphore = null;
+        IAsyncDisposable distLock = null;
 
         try
         {
@@ -589,6 +609,27 @@ public class BaseController : Controller
                             IsSuccess = true,
                             Value = entryValue
                         };
+                    }
+                }
+
+                var dl = HybridCache.GetDistributedLock();
+                if (dl != null)
+                {
+                    var pg = CoreInit.conf.cache.pg;
+                    distLock = await dl.AcquireAsync(key, TimeSpan.FromMilliseconds(pg.advisoryLockTimeoutMs)).ConfigureAwait(false);
+                    if (distLock != null && hybridCache.ContainsKey(key, out entryValue, out cachEx))
+                    {
+                        if (entryValue != null && !entryValue.Equals(default(T)))
+                        {
+                            HttpContext.Response.Headers["X-Invoke-Cache"] = "HIT";
+                            UpdateStatiCacheFeatures(cachEx);
+
+                            return new CacheResult<T>()
+                            {
+                                IsSuccess = true,
+                                Value = entryValue
+                            };
+                        }
                     }
                 }
             }
@@ -623,6 +664,8 @@ public class BaseController : Controller
         }
         finally
         {
+            if (distLock != null)
+                await distLock.DisposeAsync().ConfigureAwait(false);
             semaphore?.Release();
         }
     }

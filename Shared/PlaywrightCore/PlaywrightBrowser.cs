@@ -1,11 +1,72 @@
 using Microsoft.Playwright;
 using Shared.Models.Events;
+using System.Threading;
 
 namespace Shared.PlaywrightCore;
 
 public class PlaywrightBrowser : IDisposable
 {
     static readonly Serilog.ILogger Log = Serilog.Log.ForContext<PlaywrightBrowser>();
+
+    #region page-gate (общий лимит одновременных вкладок chromium+firefox)
+    static SemaphoreSlim _pageGate;
+    static int _pageGateLimit;
+    static int _pageGateWaiters;
+    static readonly object _pageGateInitLock = new();
+
+    public static int PageGateWaiters => _pageGateWaiters;
+
+    public static int PageGateAvailable => _pageGate?.CurrentCount ?? -1;
+
+    public static int PageGateLimit => _pageGateLimit;
+
+    static SemaphoreSlim PageGate
+    {
+        get
+        {
+            if (_pageGate != null)
+                return _pageGate;
+
+            lock (_pageGateInitLock)
+            {
+                if (_pageGate == null)
+                {
+                    int limit = Shared.CoreInit.conf?.playwright_maxPages ?? 0;
+                    _pageGateLimit = limit > 0 ? limit : 0;
+                    int initial = limit > 0 ? limit : int.MaxValue;
+                    _pageGate = new SemaphoreSlim(initial, int.MaxValue);
+                }
+            }
+            return _pageGate;
+        }
+    }
+
+    // true — слот успешно захвачен, требуется парный ReleasePage().
+    // false — лимит отключён (playwright_maxPages <= 0), Release не нужен.
+    public static async Task<bool> AcquirePageAsync()
+    {
+        int limit = Shared.CoreInit.conf?.playwright_maxPages ?? 0;
+        if (limit <= 0)
+            return false;
+
+        Interlocked.Increment(ref _pageGateWaiters);
+        try
+        {
+            await PageGate.WaitAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _pageGateWaiters);
+        }
+        return true;
+    }
+
+    public static void ReleasePage()
+    {
+        try { _pageGate?.Release(); }
+        catch (SemaphoreFullException) { /* безопасно: парный release уже был */ }
+    }
+    #endregion
 
     public static PlaywrightStatus Status
     {

@@ -19,15 +19,17 @@ using System;
 using System.Web;
 using System.Collections.Concurrent;
 using System.Threading.Tasks;
+using System.Threading;
 using Shared.Models.Base;
 using System.Collections.Generic;
 using Shared.Services.Utilities;
+using Shared.Services.BestBalanser;
 
 namespace Online;
 
 public class OnlineApiController : BaseController
 {
-    record EventLinkItem(string code, int index, bool work);
+    record EventLinkItem(string code, int index, bool work, string plugin = null, int qualityScore = 0, double speedScore = 0, bool deprioritize = false);
 
     #region online.js
     [HttpGet]
@@ -545,7 +547,19 @@ public class OnlineApiController : BaseController
             if (readyCount > 0)
             {
                 bool ready = links.Count == readyCount;
-                string online = string.Join(",", links.Where(i => i?.code != null).OrderByDescending(i => i.work).ThenBy(i => i.index).Select(i => i.code));
+                var bestConf = CoreInit.conf.online?.bestBalanser;
+                bool hideBroken = ready && bestConf != null && bestConf.enable && bestConf.hideBroken;
+
+                var visible = links.Where(i => i?.code != null);
+                if (hideBroken)
+                    visible = visible.Where(i => i.work);
+
+                string online = string.Join(",", visible
+                    .OrderByDescending(i => i.work)
+                    .ThenByDescending(i => i.qualityScore)
+                    .ThenByDescending(i => i.speedScore)
+                    .ThenBy(i => i.index)
+                    .Select(i => i.code));
 
                 if (ready && !online.Contains("\"show\":true"))
                 {
@@ -753,31 +767,160 @@ public class OnlineApiController : BaseController
         {
             string memkey = CrypTo.md5($"checkOnlineSearch:{id}:{serial}:{source?.Replace("tmdb", "")?.Replace("cub", "")}:{online.Count}:{(IsKitConf ? requestInfo.user_uid : null)}");
 
+            // Общий для всех инстансов ключ events-кеша в PG: один фильм — один результат,
+            // независимо от инстанса и uid. При kitconf-персонализации PG-шаринг отключён.
+            bool pgEvents = !IsKitConf && EventsPgMode;
+            string eventsKey = pgEvents
+                ? $"events:{id}:{serial}:{source?.Replace("tmdb", "")?.Replace("cub", "")}"
+                : null;
+
             if (!memoryCache.TryGetValue(memkey, out List<EventLinkItem> links))
             {
+                // Общий результат /lite/events из PG — собран любым инстансом, отдаём без фан-аута.
+                links = pgEvents ? await ReadEventsPg(eventsKey) : null;
+                bool fromPgEvents = links != null;
+
                 var tasks = new List<Task>();
-                links = new List<EventLinkItem>(online.Count);
-                for (int i = 0; i < online.Count; i++)
-                    links.Add(default);
+                var errflag = new int[1];
 
-                memoryCache.Set(memkey, links, DateTime.Now.AddMinutes(5));
-
-                foreach (var o in online.OrderBy(i => i.index))
+                if (fromPgEvents)
                 {
-                    var tk = checkSearch(memkey, kitconf, links, tasks.Count, o.index, o.name, o.url, o.plugin, id, imdb_id, kinopoisk_id, tmdb_id, title, original_title, original_language, source, year, serial, life, rchtype);
-                    tasks.Add(tk);
+                    memoryCache.Set(memkey, links, DateTime.Now.AddMinutes(5));
+                }
+                else
+                {
+                    links = new List<EventLinkItem>(online.Count);
+                    for (int i = 0; i < online.Count; i++)
+                        links.Add(default);
+
+                    memoryCache.Set(memkey, links, DateTime.Now.AddMinutes(5));
+
+                    foreach (var o in online.OrderBy(i => i.index))
+                    {
+                        var tk = checkSearch(memkey, kitconf, links, tasks.Count, o.index, o.name, o.url, o.plugin, id, imdb_id, kinopoisk_id, tmdb_id, title, original_title, original_language, source, year, serial, life, rchtype, errflag);
+                        tasks.Add(tk);
+                    }
                 }
 
                 if (life)
+                {
+                    if (!fromPgEvents && pgEvents)
+                        _ = WriteEventsAfter(tasks, eventsKey, links, errflag);
                     return Json(new { life = true, memkey, title = (fix_title ? title : null) });
+                }
 
+                if (!fromPgEvents)
+                {
                 await Task.WhenAll(tasks);
+
+                #region speed-probe — фоновое ранжирование рабочих балансеров
+                Task<Dictionary<string, BalanserHealth>> probeBackground = null;
+                var bestConf = CoreInit.conf.online?.bestBalanser;
+                if (bestConf != null && bestConf.enable)
+                {
+                    var loopbackBase = $"http://{CoreInit.conf.listen.localhost}:{CoreInit.conf.listen.port}";
+                    var loopbackHeaders = new Dictionary<string, string>
+                    {
+                        ["xhost"] = host,
+                        ["xscheme"] = HttpContext.Request.Scheme,
+                        ["lcrqpasswd"] = CoreInit.rootPasswd
+                    };
+
+                    string baseQuery = $"id={HttpUtility.UrlEncode(id)}&imdb_id={imdb_id}&kinopoisk_id={kinopoisk_id}&tmdb_id={tmdb_id}&title={HttpUtility.UrlEncode(title)}&original_title={HttpUtility.UrlEncode(original_title)}&original_language={original_language}&source={source}&year={year}&serial={serial}&rchtype={rchtype}";
+
+                    var candidates = new List<BalanserCandidate>(links.Count);
+                    for (int i = 0; i < links.Count; i++)
+                    {
+                        var l = links[i];
+                        if (l == null || !l.work || string.IsNullOrEmpty(l.plugin)) continue;
+
+                        // Восстановить URL: из l.code (JSON) уже не достать удобно, поэтому идём по online
+                        var o = online.FirstOrDefault(x => string.Equals(x.plugin, l.plugin, StringComparison.OrdinalIgnoreCase));
+                        if (string.IsNullOrEmpty(o.url)) continue;
+
+                        string fullUrl = o.url.Replace("{localhost}", loopbackBase)
+                            + (o.url.Contains("?") ? "&" : "?") + baseQuery;
+
+                        candidates.Add(new BalanserCandidate(l.plugin, o.name, fullUrl));
+                    }
+
+                    string probeKey = BestBalanserService.BuildKey(imdb_id, kinopoisk_id, tmdb_id, serial);
+
+                    // Готовый замер из локального кеша — применяем сразу, без задержки.
+                    var cachedHealths = BestBalanserService.Peek(probeKey);
+                    if (cachedHealths != null)
+                    {
+                        ApplyHealths(links, cachedHealths);
+                    }
+                    else if (candidates.Count > 0)
+                    {
+                        // Замера ещё нет — гоняем probe В ФОНЕ (CancellationToken.None, чтобы он
+                        // пережил завершение запроса). Текущий запрос отдаётся без ранжирования,
+                        // результат подхватят следующие запросы из balanser_best / events_cache.
+                        probeBackground = BestBalanserService.RunOrJoinAsync(
+                            probeKey, candidates, isSerial: serial == 1, loopbackHeaders,
+                            bestConf.totalTimeoutMs, bestConf.perProbeTimeoutMs,
+                            bestConf.speedSamples, bestConf.maxRetries,
+                            bestConf.successCacheMinutes, bestConf.failureCacheMinutes,
+                            CancellationToken.None);
+                    }
+                }
+                #endregion
+
+                // Партиал с упавшим под-запросом не морозим на 5 мин — кешируем кратко (60с),
+                // чтобы он быстро самовылечился. Чистая сборка живёт полные 5 минут.
+                bool unreliable = errflag[0] > 0 || links.Any(l => l == null);
+                var eventsTtl = unreliable ? TimeSpan.FromSeconds(60) : TimeSpan.FromMinutes(5);
+                memoryCache.Set(memkey, links, DateTime.Now.Add(eventsTtl));
+
+                if (pgEvents)
+                {
+                    // merge-запись: общий результат обновится, только если он не беднее.
+                    // RETURNING отдаёт актуальную версию — union от всех инстансов.
+                    var merged = await WriteEventsPg(eventsKey, links, eventsTtl);
+                    if (merged != null && merged.Count > 0)
+                    {
+                        links = merged;
+                        memoryCache.Set(memkey, links, DateTime.Now.Add(eventsTtl));
+                    }
+                }
+
+                // Фоновый probe: по завершении дописываем ранжирование в links (тот же объект
+                // лежит в memoryCache[memkey]) и переписываем общий events_cache в PG.
+                if (probeBackground != null)
+                {
+                    var bgLinks = links;
+                    _ = probeBackground.ContinueWith(t =>
+                    {
+                        if (t.Status != TaskStatus.RanToCompletion || t.Result == null)
+                            return;
+                        ApplyHealths(bgLinks, t.Result);
+                        if (pgEvents)
+                            _ = WriteEventsPg(eventsKey, bgLinks, eventsTtl);
+                    }, TaskScheduler.Default);
+                }
+                }
             }
 
             if (life)
                 return Json(new { life = true, memkey });
 
-            return ContentTo($"[{string.Join(",", links.Where(i => i.code != null).OrderByDescending(i => i.work).ThenBy(i => i.index).Select(i => i.code)).Replace("{localhost}", host)}]");
+            var bestConf2 = CoreInit.conf.online?.bestBalanser;
+            bool hideBroken = bestConf2 != null && bestConf2.enable && bestConf2.hideBroken;
+
+            var visible = links.Where(i => i?.code != null);
+            if (hideBroken)
+                visible = visible.Where(i => i.work);
+
+            var sorted = visible
+                .OrderByDescending(i => i.work)
+                .ThenByDescending(i => i.qualityScore)
+                .ThenBy(i => i.deprioritize)
+                .ThenByDescending(i => i.speedScore)
+                .ThenBy(i => i.index)
+                .Select(i => i.code);
+
+            return ContentTo($"[{string.Join(",", sorted).Replace("{localhost}", host)}]");
         }
         #endregion
 
@@ -788,7 +931,7 @@ public class OnlineApiController : BaseController
 
     #region checkSearch
     async Task checkSearch(string memkey, JObject kitconf, List<EventLinkItem> links, int indexList, int index, string name, string uri, string plugin,
-                           string id, string imdb_id, long kinopoisk_id, long tmdb_id, string title, string original_title, string original_language, string source, int year, int serial, bool life, string rchtype)
+                           string id, string imdb_id, long kinopoisk_id, long tmdb_id, string title, string original_title, string original_language, string source, int year, int serial, bool life, string rchtype, int[] errflag)
     {
         try
         {
@@ -799,7 +942,11 @@ public class OnlineApiController : BaseController
             string res = await Http.Get(AccsDbInvk.Args(checkuri, HttpContext), timeoutSeconds: 10, headers: header);
 
             if (string.IsNullOrEmpty(res))
+            {
+                // null от Http.Get = таймаут / non-200 / пустой ответ → под-запрос упал.
+                System.Threading.Interlocked.Increment(ref errflag[0]);
                 res = string.Empty;
+            }
 
             bool rch = res.Contains("\"rch\":true");
             bool work = rch || res.Contains("data-json=")
@@ -810,8 +957,11 @@ public class OnlineApiController : BaseController
             string quality = string.Empty;
             string balanser = plugin.Contains("/") ? plugin.Split("/")[1] : plugin;
 
+            // Извлекаем quality всегда когда есть work — чтобы bestBalanser мог отсортировать.
+            bool extractQuality = work && (life || CoreInit.conf.online?.bestBalanser?.enable == true);
+
             #region определение качества
-            if (work && life)
+            if (extractQuality)
             {
                 foreach (string q in new string[] { "2160", "1080", "720", "480", "360" })
                 {
@@ -858,12 +1008,148 @@ public class OnlineApiController : BaseController
                 name += quality;
             }
 
-            links[indexList] = new("{" + $"\"name\":\"{name}\",\"url\":\"{uri}\",\"index\":{index},\"show\":{work.ToString().ToLower()},\"balanser\":\"{plugin}\",\"rch\":{rch.ToString().ToLower()}" + "}", index, work);
+            int qualityScore = ParseQualityScore(quality);
+            bool deprioritize = name.Contains("(Украинский)");
+
+            links[indexList] = new("{" + $"\"name\":\"{name}\",\"url\":\"{uri}\",\"index\":{index},\"show\":{work.ToString().ToLower()},\"balanser\":\"{plugin}\",\"rch\":{rch.ToString().ToLower()}" + "}", index, work, plugin, qualityScore, 0, deprioritize);
         }
         catch (Exception ex)
         {
+            System.Threading.Interlocked.Increment(ref errflag[0]);
             Serilog.Log.Error(ex, "CatchId={CatchId}", "id_effc21fb");
         }
+    }
+
+    static int ParseQualityScore(string label)
+    {
+        if (string.IsNullOrEmpty(label)) return 0;
+        if (label.Contains("4K", StringComparison.OrdinalIgnoreCase)) return 90;
+        var m = Regex.Match(label, @"(\d{3,4})");
+        if (!m.Success || !int.TryParse(m.Groups[1].Value, out int n)) return 0;
+        // Нестандартные высоты вроде 1036p/690p раскладываются в стандартные тиры:
+        // 2160+ → 4K, 1440+ → 1440p, 1024+ → 1080p, 700+ → 720p и т.д.
+        if (n >= 2160) return 90;
+        if (n >= 1440) return 70;
+        if (n >= 1024) return 60;
+        if (n >= 700)  return 40;
+        if (n >= 460)  return 20;
+        if (n >= 340)  return 10;
+        return 0;
+    }
+
+    static readonly Regex _codeNameRx = new("\"name\":\"([^\"]*)\"", RegexOptions.Compiled);
+    static readonly Regex _nameTailQualityRx = new(@"\s*[-~]\s*(?:\d{3,4}p?|4K(?:\s*HDR)?)\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    static string NormalizeQualityLabel(string q)
+    {
+        if (string.IsNullOrEmpty(q)) return q;
+        var m = Regex.Match(q, @"(\d{3,4})");
+        if (!m.Success) return q;
+        if (!int.TryParse(m.Groups[1].Value, out int n)) return q;
+        if (n >= 2160) return q.Contains("HDR", StringComparison.OrdinalIgnoreCase) ? "4K HDR" : "4K";
+        return n + "p";
+    }
+
+    static string RewriteCodeNameQuality(string code, string realQuality)
+    {
+        if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(realQuality)) return code;
+        string normalized = NormalizeQualityLabel(realQuality);
+        return _codeNameRx.Replace(code, m =>
+        {
+            string name = _nameTailQualityRx.Replace(m.Groups[1].Value, "").TrimEnd();
+            return "\"name\":\"" + name + " ~ " + normalized + "\"";
+        }, 1);
+    }
+    #endregion
+
+    // Применить результат speed-probe к списку источников: speedScore для сортировки +
+    // уточнённое качество. Probe НЕ скрывает источники (его резолвер ненадёжен) — вердикт
+    // «источник есть» остаётся за checkSearch, probe может работу только подтвердить.
+    static void ApplyHealths(List<EventLinkItem> links, Dictionary<string, BalanserHealth> healths)
+    {
+        if (links == null || healths == null || healths.Count == 0)
+            return;
+
+        for (int i = 0; i < links.Count; i++)
+        {
+            var l = links[i];
+            if (l == null || string.IsNullOrEmpty(l.plugin)) continue;
+            if (!healths.TryGetValue(l.plugin, out var h) || h == null) continue;
+
+            bool newWork = h.isWorking || h.isRch || l.work;
+            int probeQ = ParseQualityScore(h.quality);
+            int newQ = probeQ > 0 ? probeQ : l.qualityScore;
+            string newCode = h.isWorking && !string.IsNullOrEmpty(h.quality)
+                ? RewriteCodeNameQuality(l.code, h.quality)
+                : l.code;
+            links[i] = l with { code = newCode, speedScore = h.finalScore, work = newWork, qualityScore = newQ };
+        }
+    }
+
+    #region events_cache (общий кеш агрегации /lite/events)
+    static bool EventsPgMode =>
+        Shared.CoreInit.conf.cache?.type == "pg" && Shared.Services.Hybrid.PostgresHybridCache.DataSource != null;
+
+    // Считать общий результат /lite/events из PG (собран любым инстансом).
+    static async Task<List<EventLinkItem>> ReadEventsPg(string movieKey)
+    {
+        try
+        {
+            string payload = await Shared.Services.Hybrid.PostgresHybridCache.ReadEventsAsync(movieKey).ConfigureAwait(false);
+            if (string.IsNullOrEmpty(payload))
+                return null;
+
+            var list = Newtonsoft.Json.JsonConvert.DeserializeObject<List<EventLinkItem>>(payload);
+            return list != null && list.Count > 0 ? list : null;
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Error(ex, "CatchId={CatchId}", "events_pg_read");
+            return null;
+        }
+    }
+
+    // Записать собранный результат в общий PG-кеш (merge) и вернуть актуальный список.
+    static async Task<List<EventLinkItem>> WriteEventsPg(string movieKey, List<EventLinkItem> links, TimeSpan ttl)
+    {
+        try
+        {
+            var clean = links.Where(l => l != null && l.code != null).ToList();
+            if (clean.Count == 0)
+                return null;
+
+            int workCount = clean.Count(l => l.work);
+            string payload = Newtonsoft.Json.JsonConvert.SerializeObject(clean);
+            string merged = await Shared.Services.Hybrid.PostgresHybridCache.WriteEventsMergeAsync(
+                movieKey, payload, workCount, DateTimeOffset.Now.Add(ttl)).ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(merged))
+                return null;
+
+            return Newtonsoft.Json.JsonConvert.DeserializeObject<List<EventLinkItem>>(merged);
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Error(ex, "CatchId={CatchId}", "events_pg_write");
+            return null;
+        }
+    }
+
+    // life-режим: дождаться фоновых checkSearch-тасков и записать результат в общий PG-кеш.
+    static async Task WriteEventsAfter(List<Task> tasks, string movieKey, List<EventLinkItem> links, int[] errflag)
+    {
+        try
+        {
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        catch { }
+
+        try
+        {
+            bool unreliable = errflag[0] > 0 || links.Any(l => l == null);
+            await WriteEventsPg(movieKey, links, unreliable ? TimeSpan.FromSeconds(60) : TimeSpan.FromMinutes(5)).ConfigureAwait(false);
+        }
+        catch { }
     }
     #endregion
 }

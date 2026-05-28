@@ -428,6 +428,13 @@ public class Startup
         Shared.Startup.Configure(app, memory);
         HybridCache.Configure(memory);
         HybridFileCache.Configure(memory);
+        if (init.cache?.type == "pg")
+        {
+            PostgresHybridCache.Configure(memory);
+            HybridCache.Configure(new PostgresHybridCache());
+            if (init.cache.pg?.distributedLock == true)
+                HybridCache.ConfigureDistributedLock(new PostgresDistributedLock());
+        }
         ProxyManager.Configure(memory);
 
         Http.httpClientFactory = httpClientFactory;

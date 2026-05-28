@@ -225,9 +225,16 @@ public class Firefox : PlaywrightBase, IDisposable
 
     KeepopenPage keepopen_page { get; set; }
 
+    bool gateAcquired;
+
 
     async public Task<IPage> NewPageAsync(string plugin, Dictionary<string, string> headers = null, (string ip, string username, string password) proxy = default, bool keepopen = true)
     {
+        if (browser == null)
+            return null;
+
+        gateAcquired = await PlaywrightBrowser.AcquirePageAsync().ConfigureAwait(false);
+
         try
         {
             if (browser == null)
@@ -373,30 +380,44 @@ public class Firefox : PlaywrightBase, IDisposable
 
     public void Dispose()
     {
-        if (browser == null || CoreInit.conf.firefox.DEV)
-            return;
-
         try
         {
-            page.RequestFailed -= Page_RequestFailed;
+            if (browser == null || CoreInit.conf.firefox.DEV)
+                return;
 
-            if (keepopen_page != null)
+            if (page == null)
+                return;
+
+            try
             {
-                keepopen_page.page.GotoAsync("about:blank").ConfigureAwait(false);
-                keepopen_page.lastActive = DateTime.Now;
-                keepopen_page.lockTo = DateTime.Now.AddSeconds(1);
-                keepopen_page.busy = false;
+                page.RequestFailed -= Page_RequestFailed;
+
+                if (keepopen_page != null)
+                {
+                    keepopen_page.page.GotoAsync("about:blank").ConfigureAwait(false);
+                    keepopen_page.lastActive = DateTime.Now;
+                    keepopen_page.lockTo = DateTime.Now.AddSeconds(1);
+                    keepopen_page.busy = false;
+                }
+                else
+                {
+                    page.Popup -= Page_Popup;
+                    page.Download -= Page_Download;
+                    page.CloseAsync().ConfigureAwait(false);
+                }
             }
-            else
+            catch (System.Exception ex)
             {
-                page.Popup -= Page_Popup;
-                page.Download -= Page_Download;
-                page.CloseAsync().ConfigureAwait(false);
+                Log.Error(ex, "CatchId={CatchId}", "id_t1n5fjcg");
             }
         }
-        catch (System.Exception ex)
+        finally
         {
-            Log.Error(ex, "CatchId={CatchId}", "id_t1n5fjcg");
+            if (gateAcquired)
+            {
+                gateAcquired = false;
+                PlaywrightBrowser.ReleasePage();
+            }
         }
     }
 
