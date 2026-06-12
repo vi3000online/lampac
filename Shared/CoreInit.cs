@@ -231,6 +231,11 @@ public class CoreInit
 
     public string corsehost { get; set; } = "";
 
+    // Домены, которым разрешён браузерный доступ (Origin/Referer проверяются в ModHeaders),
+    // поддомены включены. Пустой список — разрешены все.
+    // Запросы без Origin/Referer (curl, server-side, healthcheck) не фильтруются.
+    public string[] allowOrigins { get; set; } = Array.Empty<string>();
+
     public bool DynamicModule { get; set; }
 
     public BaseModule BaseModule { get; set; } = new BaseModule()

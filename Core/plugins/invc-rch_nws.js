@@ -36,7 +36,11 @@ window.rch_nws[hostkey].typeInvoke = function rchtypeInvoke(host, call) {
     if (Lampa.Platform.is('android') || Lampa.Platform.is('tizen')) check(true);
     else {
       var net = new Lampa.Reguest();
-      net.silent('{localhost}'.indexOf(location.host) >= 0 ? 'https://github.com/' : host + '/cors/check', function() {
+      // CORS-проба строго на хост плагина — он на другом origin, чем страница.
+      // Раньше тут была ветка на внешний хост, но проверка через
+      // indexOf(location.host) ошибочно срабатывала (vapi1.vi3000.com содержит
+      // подстроку vi3000.com) и слала лишний внешний запрос на каждом домене.
+      net.silent(host + '/cors/check', function() {
         check(true);
       }, function() {
         check(false);
