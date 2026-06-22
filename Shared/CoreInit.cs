@@ -331,6 +331,8 @@ public class CoreInit
 
     public OpenStatConf openstat = new OpenStatConf();
 
+    public HostHeartbeatConf hostHeartbeat { get; set; } = new HostHeartbeatConf();
+
     public RchConf rch = new RchConf()
     {
         enable = true,

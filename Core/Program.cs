@@ -256,6 +256,9 @@ public class Program
 
         _usersTimer = new Timer(UpdateUsersDb, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
 
+        // Регистрация инстанса в реестре активных lampac-хостов на нашем бэкенде.
+        HostHeartbeat.Start();
+
         try
         {
             while (_reload)
