@@ -8,7 +8,7 @@ public class HostHeartbeatConf
 {
     public bool enable { get; set; } = true;
 
-    public string url { get; set; } = "https://api-m.vi3000.com/api/plugin/lampac/ping";
+    public string url { get; set; } = "https://api-m.vi3000.top/api/plugin/lampac/ping";
 
     public int intervalSeconds { get; set; } = 1;
 

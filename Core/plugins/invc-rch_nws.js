@@ -38,8 +38,8 @@ window.rch_nws[hostkey].typeInvoke = function rchtypeInvoke(host, call) {
       var net = new Lampa.Reguest();
       // CORS-проба строго на хост плагина — он на другом origin, чем страница.
       // Раньше тут была ветка на внешний хост, но проверка через
-      // indexOf(location.host) ошибочно срабатывала (vapi1.vi3000.com содержит
-      // подстроку vi3000.com) и слала лишний внешний запрос на каждом домене.
+      // indexOf(location.host) ошибочно срабатывала (vapi1.vi3000.top содержит
+      // подстроку vi3000.top) и слала лишний внешний запрос на каждом домене.
       net.silent(host + '/cors/check', function() {
         check(true);
       }, function() {

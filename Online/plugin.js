@@ -6,7 +6,7 @@
     // Балансировка: при загрузке плагина случайно выбираем один из vapi-хостов
     // и фиксируем его на всю сессию (иначе memkey / lifeevents развалятся).
     localhost: (function() {
-      var hosts = ['vapi1.vi3000.com', 'vapi2.vi3000.com', 'vapi3.vi3000.com', 'vapi4.vi3000.com'];
+      var hosts = ['vapi1.vi3000.top', 'vapi2.vi3000.top', 'vapi3.vi3000.top', 'vapi4.vi3000.top'];
       var pick = hosts[Math.floor(Math.random() * hosts.length)];
       var scheme = (window.location.protocol === 'http:' ? 'http:' : 'https:');
       return scheme + '//' + pick + '/';
