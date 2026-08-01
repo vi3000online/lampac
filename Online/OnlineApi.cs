@@ -536,7 +536,7 @@ public class OnlineApiController : BaseController
     [HttpGet]
     [AllowAnonymous]
     [Route("lifeevents")]
-    public ActionResult LifeEvents(string memkey, long id, string imdb_id, long kinopoisk_id, int serial)
+    public ActionResult LifeEvents(string memkey, long id, string imdb_id, long kinopoisk_id, int serial, long tmdb_id = 0)
     {
         string json = null;
         JsonResult error(string msg) => Json(new { accsdb = true, ready = true, online = new string[] { }, msg });
@@ -550,14 +550,30 @@ public class OnlineApiController : BaseController
                 var bestConf = CoreInit.conf.online?.bestBalanser;
                 bool hideBroken = ready && bestConf != null && bestConf.enable && bestConf.hideBroken;
 
+                // Подтянуть готовый speed-probe (свой или чужого инстанса через PG):
+                // links в memoryCache обновляется фоновым ProbeEventsAfterAsync, но при
+                // ответе из общего events-кеша фон на этом инстансе не запускался —
+                // Peek закрывает и этот случай.
+                Dictionary<string, BalanserHealth> probeHealths = null;
+                if (bestConf != null && bestConf.enable)
+                {
+                    string probeKey = BestBalanserService.BuildKey(imdb_id, kinopoisk_id, ProbeTmdbKey(tmdb_id, id.ToString()), serial);
+                    probeHealths = BestBalanserService.Peek(probeKey);
+                    if (probeHealths != null)
+                        ApplyHealths(links, probeHealths);
+                }
+
                 var visible = links.Where(i => i?.code != null);
                 if (hideBroken)
                     visible = visible.Where(i => i.work);
 
+                // Сначала подтверждённые пробой (speedScore > 0, реально играют), внутри —
+                // по замеренному finalScore; неподтверждённые ниже, по заявленному качеству.
                 string online = string.Join(",", visible
                     .OrderByDescending(i => i.work)
-                    .ThenByDescending(i => i.qualityScore)
+                    .ThenByDescending(i => i.speedScore > 0)
                     .ThenByDescending(i => i.speedScore)
+                    .ThenByDescending(i => i.qualityScore)
                     .ThenBy(i => i.index)
                     .Select(i => i.code));
 
@@ -569,7 +585,17 @@ public class OnlineApiController : BaseController
                     return error($"Не удалось найти онлайн для {(serial == 1 ? "сериала" : "фильма")}");
                 }
 
-                json = $"{{\"ready\":{(ready ? "true" : "false")},\"tasks\":{links.Count},\"online\":[{online.Replace("{localhost}", host)}]}}";
+                // probe: карта plugin → результат замера. Плагин её игнорирует, но наш
+                // пробер и фронт по ней отличают «подтверждён пробой» от «просто нашёлся».
+                string probeJson = "";
+                if (probeHealths != null && probeHealths.Count > 0)
+                {
+                    probeJson = ",\"probe\":{" + string.Join(",", probeHealths.Values
+                        .Where(h => h != null && !string.IsNullOrEmpty(h.plugin))
+                        .Select(h => $"\"{h.plugin.ToLower()}\":{{\"ok\":{h.isWorking.ToString().ToLower()},\"score\":{h.finalScore.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)},\"quality\":\"{h.quality}\"}}")) + "}";
+                }
+
+                json = $"{{\"ready\":{(ready ? "true" : "false")},\"tasks\":{links.Count}{probeJson},\"online\":[{online.Replace("{localhost}", host)}]}}";
             }
         }
 
@@ -806,6 +832,32 @@ public class OnlineApiController : BaseController
                 {
                     if (!fromPgEvents && pgEvents)
                         _ = WriteEventsAfter(tasks, eventsKey, links, errflag);
+
+                    #region speed-probe в life-режиме
+                    // Продовый плагин ходит ТОЛЬКО с life=true, поэтому probe обязан
+                    // стартовать и здесь: дожидаемся checkSearch-тасков в фоне, меряем
+                    // рабочие балансеры и дописываем ранжирование в links (тот же объект
+                    // лежит в memoryCache[memkey] — lifeevents подхватит на очередном
+                    // поллинге через Peek/ApplyHealths).
+                    var lifeBestConf = CoreInit.conf.online?.bestBalanser;
+                    if (lifeBestConf != null && lifeBestConf.enable)
+                    {
+                        var lifeLoopbackBase = $"http://{CoreInit.conf.listen.localhost}:{CoreInit.conf.listen.port}";
+                        var lifeLoopbackHeaders = new Dictionary<string, string>
+                        {
+                            ["xhost"] = host,
+                            ["xscheme"] = HttpContext.Request.Scheme,
+                            ["lcrqpasswd"] = CoreInit.rootPasswd
+                        };
+
+                        string lifeBaseQuery = $"id={HttpUtility.UrlEncode(id)}&imdb_id={imdb_id}&kinopoisk_id={kinopoisk_id}&tmdb_id={tmdb_id}&title={HttpUtility.UrlEncode(title)}&original_title={HttpUtility.UrlEncode(original_title)}&original_language={original_language}&source={source}&year={year}&serial={serial}&rchtype={rchtype}";
+                        string lifeProbeKey = BestBalanserService.BuildKey(imdb_id, kinopoisk_id, ProbeTmdbKey(tmdb_id, id), serial);
+
+                        _ = ProbeEventsAfterAsync(tasks, links, online, lifeProbeKey, lifeLoopbackBase, lifeLoopbackHeaders,
+                            lifeBaseQuery, serial == 1, lifeBestConf, eventsKey, pgEvents);
+                    }
+                    #endregion
+
                     return Json(new { life = true, memkey, title = (fix_title ? title : null) });
                 }
 
@@ -844,7 +896,7 @@ public class OnlineApiController : BaseController
                         candidates.Add(new BalanserCandidate(l.plugin, o.name, fullUrl));
                     }
 
-                    string probeKey = BestBalanserService.BuildKey(imdb_id, kinopoisk_id, tmdb_id, serial);
+                    string probeKey = BestBalanserService.BuildKey(imdb_id, kinopoisk_id, ProbeTmdbKey(tmdb_id, id), serial);
 
                     // Готовый замер из локального кеша — применяем сразу, без задержки.
                     var cachedHealths = BestBalanserService.Peek(probeKey);
@@ -914,9 +966,10 @@ public class OnlineApiController : BaseController
 
             var sorted = visible
                 .OrderByDescending(i => i.work)
-                .ThenByDescending(i => i.qualityScore)
+                .ThenByDescending(i => i.speedScore > 0)
                 .ThenBy(i => i.deprioritize)
                 .ThenByDescending(i => i.speedScore)
+                .ThenByDescending(i => i.qualityScore)
                 .ThenBy(i => i.index)
                 .Select(i => i.code);
 
@@ -1150,6 +1203,85 @@ public class OnlineApiController : BaseController
             await WriteEventsPg(movieKey, links, unreliable ? TimeSpan.FromSeconds(60) : TimeSpan.FromMinutes(5)).ConfigureAwait(false);
         }
         catch { }
+    }
+
+    // tmdb-компонент ключа пробы: у большинства карточек tmdb_id не приходит отдельным
+    // параметром, но id и есть tmdb id (source=tmdb). Без фолбэка карточки без
+    // imdb/kp/tmdb слипались бы в один ключ "…|0|0|serial" и делили чужие замеры.
+    static long ProbeTmdbKey(long tmdb_id, string id)
+    {
+        if (tmdb_id > 0) return tmdb_id;
+        return long.TryParse(id, out long fromId) && fromId > 0 ? fromId : 0;
+    }
+
+    // life-режим: дождаться checkSearch-тасков, прогнать speed-probe по найденным
+    // балансерам и вписать ранжирование в links (объект живёт в memoryCache — его
+    // читает каждый поллинг lifeevents). Затем обновить общий events-кеш в PG.
+    static async Task ProbeEventsAfterAsync(
+        List<Task> tasks,
+        List<EventLinkItem> links,
+        List<(string name, string url, string plugin, int index)> online,
+        string probeKey,
+        string loopbackBase,
+        Dictionary<string, string> loopbackHeaders,
+        string baseQuery,
+        bool isSerial,
+        Shared.Models.AppConf.BestBalanserConf bestConf,
+        string eventsKey,
+        bool pgEvents)
+    {
+        try
+        {
+            try
+            {
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+            }
+            catch { }
+
+            // Готовый замер (свой или чужой из PG) — применяем без повторной пробы.
+            var cached = BestBalanserService.Peek(probeKey);
+            if (cached != null)
+            {
+                ApplyHealths(links, cached);
+                return;
+            }
+
+            var candidates = new List<BalanserCandidate>(links.Count);
+            foreach (var l in links)
+            {
+                if (l == null || !l.work || string.IsNullOrEmpty(l.plugin)) continue;
+
+                var o = online.FirstOrDefault(x => string.Equals(x.plugin, l.plugin, StringComparison.OrdinalIgnoreCase));
+                if (string.IsNullOrEmpty(o.url)) continue;
+
+                string fullUrl = o.url.Replace("{localhost}", loopbackBase)
+                    + (o.url.Contains("?") ? "&" : "?") + baseQuery;
+
+                candidates.Add(new BalanserCandidate(l.plugin, o.name, fullUrl));
+            }
+
+            if (candidates.Count == 0)
+                return;
+
+            var healths = await BestBalanserService.RunOrJoinAsync(
+                probeKey, candidates, isSerial, loopbackHeaders,
+                bestConf.totalTimeoutMs, bestConf.perProbeTimeoutMs,
+                bestConf.speedSamples, bestConf.maxRetries,
+                bestConf.successCacheMinutes, bestConf.failureCacheMinutes,
+                CancellationToken.None).ConfigureAwait(false);
+
+            if (healths == null || healths.Count == 0)
+                return;
+
+            ApplyHealths(links, healths);
+
+            if (pgEvents)
+                await WriteEventsPg(eventsKey, links, TimeSpan.FromMinutes(5)).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Error(ex, "CatchId={CatchId}", "probe_life_after");
+        }
     }
     #endregion
 }
